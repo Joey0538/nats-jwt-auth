@@ -1,0 +1,48 @@
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    ports:
+      - "9090:8080"
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+    volumes:
+      - ./keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json:ro
+    command: ["start-dev", "--import-realm"]
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/8080 && echo -e 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && cat <&3 | grep -q '200'"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+      start_period: 60s
+
+  nats:
+    image: nats:2.11-alpine
+    ports:
+      - "4222:4222"   # client connections
+      - "8222:8222"   # HTTP monitoring
+      - "9222:9222"   # WebSocket
+    volumes:
+      - ./nats.conf:/etc/nats/nats.conf:ro
+    command: ["-c", "/etc/nats/nats.conf"]
+
+  # Auth-service runs on the HOST during development (not in this container).
+  # This entry exists so `docker compose` reads .env and the full config is
+  # visible in one place. Start it manually:
+  #
+  #   set -a && source .env && set +a && go run ../../cmd/server
+  #
+  # Why on host? The OIDC issuer in Keycloak tokens is http://localhost:9090/...
+  # go-oidc strictly validates the discovery URL matches the token issuer.
+  # Running on host means auth-service reaches Keycloak at the same URL browsers use.
+  auth-service:
+    profiles: ["host"]          # never started by `docker compose up`
+    image: alpine
+    env_file: .env              # makes .env values visible in `docker compose config`
+    environment:
+      # These are the values the auth-service needs (sourced from .env):
+      PORT: ${PORT:-8080}
+      OIDC_ISSUER_URL: ${OIDC_ISSUER_URL}
+      OIDC_AUDIENCE: ${OIDC_AUDIENCE}
+      NATS_ACCOUNT_SEED: ${NATS_ACCOUNT_SEED}
+      NATS_JWT_EXPIRY: ${NATS_JWT_EXPIRY:-1h}

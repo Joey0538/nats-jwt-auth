@@ -1,0 +1,96 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: standard
+  enable:
+    # Bugs & correctness
+    - errcheck          # unchecked errors
+    - govet             # go vet on steroids
+    - staticcheck       # comprehensive static analysis
+    - bodyclose         # HTTP response body not closed
+    - noctx             # HTTP requests without context
+    - rowserrcheck      # sql.Rows.Err not checked
+    - sqlclosecheck     # sql.Rows/Stmt not closed
+    - contextcheck      # non-inherited context
+
+    # Code quality
+    - unused            # unused code
+    - ineffassign       # assignments to existing vars that are never read
+    - unconvert         # unnecessary type conversions
+    - unparam           # unused function parameters
+    - misspell          # spelling mistakes in comments/strings
+    - predeclared       # shadowing Go predeclared identifiers
+    - copyloopvar       # loop variable capture issues
+    - intrange          # suggest integer range loops
+    - errname           # error names should be ErrFoo
+    - errorlint         # proper error wrapping
+    - goconst           # repeated strings that could be constants
+
+    # Style & maintainability
+    - revive            # extensible linter (replaces golint)
+    - whitespace        # unnecessary blank lines
+    - nolintlint        # nolint directives are well-formed
+
+  exclusions:
+    rules:
+      # Test files can be more relaxed
+      - path: _test\.go
+        linters:
+          - errcheck
+          - goconst
+          - unparam
+      # Examples are illustrative — allow unused vars, unchecked errors
+      - path: "^example/"
+        linters:
+          - errcheck
+          - unused
+          - unparam
+          - revive
+
+  settings:
+    errcheck:
+      check-type-assertions: true
+      check-blank: true
+    govet:
+      enable-all: true
+    revive:
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: dot-imports
+        - name: error-return
+        - name: error-strings
+        - name: error-naming
+        - name: exported
+          arguments: [checkPrivateReceivers]
+        - name: if-return
+        - name: increment-decrement
+        - name: var-naming
+        - name: range
+        - name: receiver-naming
+        - name: time-naming
+        - name: unexported-return
+        - name: indent-error-flow
+        - name: errorf
+        - name: empty-block
+        - name: superfluous-else
+        - name: unused-parameter
+        - name: unreachable-code
+        - name: redefines-builtin-id
+    goconst:
+      min-len: 3
+      min-occurrences: 3
+    misspell:
+      locale: US
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
+issues:
+  max-same-issues: 5
