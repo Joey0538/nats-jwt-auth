@@ -13,6 +13,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
+	"github.com/nats-io/nkeys"
 
 	internaljwt "github.com/joey0538/nats-jwt-auth/internal/jwt"
 	internaloidc "github.com/joey0538/nats-jwt-auth/internal/oidc"
@@ -77,7 +78,13 @@ func NewServer(ctx context.Context, cfg Config, opts ...Option) (*Server, error)
 	}
 
 	// Connect to OIDC provider — fetches JWKS keys for token verification
-	validator, err := internaloidc.NewValidator(ctx, cfg.OIDCIssuerURL, cfg.OIDCAudience)
+	validator, err := internaloidc.NewValidator(ctx, internaloidc.ValidatorConfig{
+		IssuerURL:        cfg.OIDCIssuerURL,
+		Audience:         cfg.OIDCAudience,
+		TLSSkipVerify:    cfg.TLSSkipVerify,
+		VerifyAZP:        cfg.OIDCVerifyAZP,
+		DiscoveryTimeout: cfg.OIDCDiscoveryTimeout,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -128,16 +135,24 @@ func NewServer(ctx context.Context, cfg Config, opts ...Option) (*Server, error)
 func (s *Server) Run() error {
 	addr := fmt.Sprintf(":%s", s.cfg.Port)
 
+	srvErr := make(chan error, 1)
 	go func() {
 		s.logger.Info("natsauth server starting", "addr", addr)
-		if err := s.echo.Start(addr); err != nil {
-			s.logger.Info("server stopped", "reason", err)
-		}
+		srvErr <- s.echo.Start(addr)
 	}()
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
+
+	select {
+	case err := <-srvErr:
+		// Listener failed (e.g. port in use). If it's a graceful shutdown, fall through.
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return fmt.Errorf("natsauth: listener failed: %w", err)
+		}
+	case <-quit:
+		// Received shutdown signal — graceful shutdown.
+	}
 
 	s.logger.Info("shutting down gracefully...")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -198,6 +213,9 @@ func (s *Server) handleAuth(c echo.Context) error {
 	if req.NATSPublicKey == "" {
 		return echo.NewHTTPError(http.StatusBadRequest, "nats_public_key is required")
 	}
+	if !nkeys.IsValidPublicUserKey(req.NATSPublicKey) {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid nats_public_key format")
+	}
 
 	// Step 1: Validate SSO token
 	oidcClaims, err := s.validator.Validate(c.Request().Context(), req.SSOToken)
@@ -223,6 +241,10 @@ func (s *Server) handleAuth(c echo.Context) error {
 	// Step 2: Ask the team's PermissionsProvider what this user can access
 	perms, err := s.permissions.GetPermissions(c.Request().Context(), userClaims)
 	if err != nil {
+		if errors.Is(err, ErrAccessDenied) {
+			s.logger.Warn("access denied", "error", err, "subject", userClaims.Subject)
+			return echo.NewHTTPError(http.StatusForbidden, err.Error())
+		}
 		s.logger.Error("permissions lookup failed", "error", err, "subject", userClaims.Subject)
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to resolve permissions")
 	}

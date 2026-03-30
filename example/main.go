@@ -9,6 +9,10 @@
 //	OIDC_AUDIENCE=my-chat-app \
 //	NATS_ACCOUNT_SEED=SA... \
 //	go run ./example
+//
+// If your Keycloak puts the client_id in "azp" instead of "aud":
+//
+//	OIDC_VERIFY_AZP=true go run ./example
 package main
 
 import (
@@ -40,6 +44,10 @@ func main() {
 					"room.engineering",
 					fmt.Sprintf("user.%s.>", user.Subject), // personal inbox
 				}
+
+				// To reject a user with 403 Forbidden:
+				//   return natsauth.Permissions{}, natsauth.NewAccessDeniedError("not allowed")
+				// Any other error returns 500 Internal Server Error.
 
 				return natsauth.Permissions{
 					PubAllow: rooms,

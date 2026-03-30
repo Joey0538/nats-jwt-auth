@@ -43,32 +43,26 @@ Frontend                    Auth Service (this pkg)           NATS Server
 
 ## Prerequisites
 
-### Install NATS tooling (macOS)
+- **Docker** — required for local development (Keycloak, NATS, and key generation)
+- **Go 1.25+** — `go version` should be 1.25 or later
 
-```bash
-# nsc -- NATS account/operator key management
-# nats -- CLI for interacting with NATS servers
-brew tap nats-io/nats-tools
-brew install nats-io/nats-tools/nsc nats-io/nats-tools/nats
+The `setup.sh` script uses the [`nats-box`](https://github.com/nats-io/nats-box) Docker image for all NATS key generation (`nsc`, `nk`), so **no local NATS tooling installation is needed**. Works identically on macOS, Ubuntu, and any OS with Docker.
 
-# nk -- low-level nkey generation tool
-go install github.com/nats-io/nkeys/nk@latest
-
-# Verify
-nsc --version
-nats --version
-nk -v
-```
-
-### Go 1.25+
-
-```bash
-go version  # should be 1.25 or later
-```
+> **Optional:** If you want the NATS CLI tools installed locally (for debugging, inspecting keys, etc.):
+>
+> ```bash
+> # macOS
+> brew tap nats-io/nats-tools
+> brew install nats-io/nats-tools/nsc nats-io/nats-tools/nats
+> go install github.com/nats-io/nkeys/nk@latest
+>
+> # Ubuntu / Linux — use nats-box instead
+> docker run --rm -it natsio/nats-box:latest
+> ```
 
 ## Local Development (quickest path)
 
-The `setup.sh` script generates all NATS keys, writes the `.env` and `nats.conf` files for you. One command to get everything running.
+The `setup.sh` script generates all NATS keys via the `nats-box` Docker image, then writes the `.env` and `nats.conf` files for you. One command to get everything running — no local `nsc` or `nk` needed.
 
 ### Step 1: Run setup
 
@@ -123,8 +117,8 @@ TOKEN=$(curl -s -X POST "http://localhost:9090/realms/chatapp/protocol/openid-co
   -d "password=testuser" \
   -d "scope=openid" | python3 -c "import sys,json; print(json.load(sys.stdin)['id_token'])")
 
-# Generate a NATS user keypair
-PUB=$(nk -gen user | nk -inkey /dev/stdin -pubout)
+# Generate a NATS user keypair (via nats-box — no local nk needed)
+PUB=$(docker run --rm natsio/nats-box:latest sh -c "nk -gen user | nk -inkey /dev/stdin -pubout")
 
 # Call the auth service
 curl -s -X POST http://localhost:8080/auth \
@@ -186,13 +180,23 @@ Operator  (top-level trust anchor, runs the NATS cluster)
 
 ### Create operator + account
 
+All `nsc` commands can be run via nats-box if you don't have `nsc` installed locally:
+
 ```bash
-# Create operator (one per NATS cluster)
+# Option A: local nsc (if installed)
 nsc add operator --name myoperator --sys
 nsc env -o myoperator
-
-# Create your team's account
 nsc add account --name chatapp
+
+# Option B: nats-box (works everywhere)
+docker run --rm -it -v $(pwd)/nsc-output:/output natsio/nats-box:latest sh -c '
+  nsc add operator --name myoperator --sys
+  nsc env -o myoperator
+  nsc add account --name chatapp
+  nsc describe operator --raw > /output/operator.jwt
+  nsc describe account chatapp --raw > /output/account.jwt
+  nsc describe account SYS --raw > /output/sys.jwt
+'
 ```
 
 ### Extract values
@@ -346,7 +350,35 @@ NATS wildcard rules:
 
 Deny always wins over Allow.
 
-### 4. UserClaims — what you get from the SSO token
+### 4. Rejecting users (403 vs 500)
+
+Return `ErrAccessDenied` or `NewAccessDeniedError("reason")` from your `PermissionsProvider` to reject a user with **403 Forbidden**. Any other error returns **500 Internal Server Error**.
+
+```go
+func (p *MyProvider) GetPermissions(ctx context.Context, user natsauth.UserClaims) (natsauth.Permissions, error) {
+    // User is banned → 403
+    if isBanned(user.Subject) {
+        return natsauth.Permissions{}, natsauth.NewAccessDeniedError("account is deactivated")
+    }
+
+    // DB is down → 500
+    rooms, err := db.GetRooms(ctx, user.Subject)
+    if err != nil {
+        return natsauth.Permissions{}, err
+    }
+
+    // No rooms → 403
+    if len(rooms) == 0 {
+        return natsauth.Permissions{}, natsauth.NewAccessDeniedError("no rooms assigned")
+    }
+
+    return natsauth.Permissions{PubAllow: rooms, SubAllow: rooms}, nil
+}
+```
+
+Response on 403: `{ "message": "natsauth: access denied: account is deactivated" }`
+
+### 5. UserClaims — what you get from the SSO token
 
 ```go
 func myProvider(ctx context.Context, user natsauth.UserClaims) (natsauth.Permissions, error) {
@@ -367,7 +399,7 @@ func myProvider(ctx context.Context, user natsauth.UserClaims) (natsauth.Permiss
 }
 ```
 
-### 5. Logger
+### 6. Logger
 
 ```go
 // Default: JSON to stdout
@@ -385,7 +417,7 @@ logger := slog.New(slog.NewJSONHandler(f, nil))
 natsauth.WithLogger(logger)
 ```
 
-### 6. Run mode
+### 7. Run mode
 
 ```go
 // Option A: Standalone — blocks until SIGTERM, handles graceful shutdown.
@@ -398,7 +430,7 @@ srv.MountOn(e, "/nats")                   // adds POST /nats/auth + GET /nats/he
 e.Start(":8080")
 ```
 
-### 7. Putting it all together
+### 8. Putting it all together
 
 ```go
 srv, err := natsauth.NewServer(ctx,
@@ -446,6 +478,8 @@ NATS permissions are locked at connection time. When a user gets invited to a ne
 | `OIDCAudience` | `string` | Yes | -- | OIDC client_id |
 | `NATSAccountSeed` | `string` | Yes | -- | `SA...` account private seed |
 | `NATSJWTExpiry` | `time.Duration` | No | `1h` | JWT lifetime |
+| `OIDCVerifyAZP` | `bool` | No | `false` | Verify `azp` claim instead of `aud` (for Keycloak) |
+| `TLSSkipVerify` | `bool` | No | `false` | Skip TLS cert verification for OIDC issuer (dev only) |
 
 ### LoadConfig()
 
@@ -462,6 +496,8 @@ cfg, err := natsauth.LoadConfig()
 | `NATS_ACCOUNT_SEED` | `Config.NATSAccountSeed` |
 | `NATS_JWT_EXPIRY` | `Config.NATSJWTExpiry` |
 | `PORT` | `Config.Port` |
+| `OIDC_VERIFY_AZP` | `Config.OIDCVerifyAZP` |
+| `TLS_SKIP_VERIFY` | `Config.TLSSkipVerify` |
 
 ### Options
 

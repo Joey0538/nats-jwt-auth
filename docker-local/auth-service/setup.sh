@@ -1,72 +1,86 @@
 #!/usr/bin/env bash
 #
 # Generates NATS operator + account keys and writes a ready-to-use .env file.
-# Run this once before `docker compose up`.
+# Uses the nats-box Docker image so it works on any OS (Mac, Ubuntu, etc.)
+# without requiring local nsc/nk installation.
 #
-# Prerequisites: nsc (brew install nats-io/nats-tools/nsc)
+# Run this once before `docker compose up`.
 #
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="$SCRIPT_DIR/.env"
-NSC_STORE="$SCRIPT_DIR/.nsc-store"
+NATS_CONF="$SCRIPT_DIR/nats.conf"
+NATS_BOX_IMAGE="natsio/nats-box:latest"
 
 echo "=== NATS JWT Auth — Local Dev Setup ==="
 echo ""
 
-# Check nsc
-if ! command -v nsc &>/dev/null; then
-  echo "ERROR: nsc not found. Install it:"
-  echo "  brew tap nats-io/nats-tools && brew install nats-io/nats-tools/nsc"
+# Check Docker
+if ! command -v docker &>/dev/null; then
+  echo "ERROR: docker not found. Install Docker first."
   exit 1
 fi
 
-# Clean slate for reproducible setup
-if [ -d "$NSC_STORE" ]; then
-  echo "Removing old NSC store at $NSC_STORE..."
-  rm -rf "$NSC_STORE"
-fi
-
-echo "Creating NATS operator + account..."
+echo "Generating NATS operator + account keys via nats-box..."
 echo ""
 
-# Point nsc at our local store
-nsc env --store "$NSC_STORE" >/dev/null 2>&1
+# Run nsc inside nats-box to generate operator, SYS account, and chatapp account.
+# Mount a temp dir to extract the generated data.
+TMPDIR=$(mktemp -d)
+trap 'rm -rf "$TMPDIR"' EXIT
 
-# Create operator
-nsc add operator --name localdev --sys 2>&1 | sed 's/^/  /'
-nsc env -o localdev >/dev/null 2>&1
+docker run --rm \
+  -v "$TMPDIR:/output" \
+  "$NATS_BOX_IMAGE" \
+  sh -c '
+    set -e
 
-# Create account
-nsc add account --name chatapp 2>&1 | sed 's/^/  /'
+    # Create operator with SYS account
+    nsc add operator --name localdev --sys 2>&1 | sed "s/^/  /"
+    nsc env -o localdev >/dev/null 2>&1
 
-# Extract values
-OPERATOR_JWT=$(nsc describe operator --raw 2>/dev/null)
-ACCOUNT_JWT=$(nsc describe account chatapp --raw 2>/dev/null)
-ACCOUNT_PUB_KEY=$(nsc describe account chatapp 2>/dev/null | grep "Account ID" | awk -F'|' '{gsub(/[ \t]/, "", $3); print $3}')
-SYS_JWT=$(nsc describe account SYS --raw 2>/dev/null)
-SYS_PUB_KEY=$(nsc describe account SYS 2>/dev/null | grep "Account ID" | awk -F'|' '{gsub(/[ \t]/, "", $3); print $3}')
+    # Create chatapp account
+    nsc add account --name chatapp 2>&1 | sed "s/^/  /"
 
-# Find account seed file — nsc stores seeds under ~/.local/share/nats/nsc/keys/
-ACCOUNT_SEED=""
-for dir in "$HOME/.local/share/nats/nsc/keys/keys" "$NSC_STORE"; do
-  SEED_FILE=$(find "$dir" -name "${ACCOUNT_PUB_KEY}.nk" 2>/dev/null | head -1)
-  if [ -n "$SEED_FILE" ]; then
-    ACCOUNT_SEED=$(cat "$SEED_FILE")
-    break
-  fi
-done
+    # Extract JWTs
+    nsc describe operator --raw > /output/operator.jwt
+    nsc describe account chatapp --raw > /output/account.jwt
+    nsc describe account SYS --raw > /output/sys.jwt
 
-if [ -z "$ACCOUNT_SEED" ]; then
-  echo "ERROR: Could not find account seed file for ${ACCOUNT_PUB_KEY}"
-  exit 1
-fi
+    # Extract public keys
+    nsc describe account chatapp 2>/dev/null | grep "Account ID" | awk -F"|" "{gsub(/[ \t]/, \"\", \$3); print \$3}" > /output/account_pub.txt
+    nsc describe account SYS 2>/dev/null | grep "Account ID" | awk -F"|" "{gsub(/[ \t]/, \"\", \$3); print \$3}" > /output/sys_pub.txt
+
+    # Find and copy account seed
+    ACCOUNT_PUB=$(cat /output/account_pub.txt)
+    SEED_FILE=$(find /root/.local/share/nats/nsc/keys -name "${ACCOUNT_PUB}.nk" 2>/dev/null | head -1)
+    if [ -z "$SEED_FILE" ]; then
+      SEED_FILE=$(find /nsc -name "${ACCOUNT_PUB}.nk" 2>/dev/null | head -1)
+    fi
+
+    if [ -z "$SEED_FILE" ]; then
+      echo "ERROR: Could not find account seed for ${ACCOUNT_PUB}"
+      exit 1
+    fi
+
+    cat "$SEED_FILE" > /output/account_seed.txt
+  '
+
+# Read generated values
+OPERATOR_JWT=$(cat "$TMPDIR/operator.jwt")
+ACCOUNT_JWT=$(cat "$TMPDIR/account.jwt")
+SYS_JWT=$(cat "$TMPDIR/sys.jwt")
+ACCOUNT_PUB_KEY=$(cat "$TMPDIR/account_pub.txt")
+SYS_PUB_KEY=$(cat "$TMPDIR/sys_pub.txt")
+ACCOUNT_SEED=$(cat "$TMPDIR/account_seed.txt")
 
 echo ""
 echo "  Operator JWT:       ${OPERATOR_JWT:0:50}..."
 echo "  Account Public Key: $ACCOUNT_PUB_KEY"
 echo "  Account JWT:        ${ACCOUNT_JWT:0:50}..."
 echo "  Account Seed:       ${ACCOUNT_SEED:0:12}..."
+echo "  SYS Public Key:     $SYS_PUB_KEY"
 echo ""
 
 # Write .env
@@ -75,7 +89,9 @@ cat > "$ENV_FILE" <<EOF
 # Regenerate with: ./setup.sh
 
 # === Keycloak (local dev) ===
-OIDC_ISSUER_URL=http://localhost:9090/realms/chatapp
+# Uses Docker service name since auth-service runs inside Docker network.
+# For host-based dev, change to http://localhost:9090/realms/chatapp
+OIDC_ISSUER_URL=http://keycloak:8080/realms/chatapp
 OIDC_AUDIENCE=nats-chat
 
 # === NATS ===
@@ -87,10 +103,15 @@ NATS_OPERATOR_JWT=${OPERATOR_JWT}
 # === Auth Service ===
 PORT=8080
 NATS_JWT_EXPIRY=1h
+
+# Keycloak puts client_id in azp instead of aud — set to true for Keycloak
+OIDC_VERIFY_AZP=true
+
+# Skip TLS cert verification for OIDC issuer (dev only — self-signed certs)
+TLS_SKIP_VERIFY=false
 EOF
 
 # Write nats.conf with baked-in values (NATS doesn't support env vars in map keys)
-NATS_CONF="$SCRIPT_DIR/nats.conf"
 cat > "$NATS_CONF" <<EOF
 # Generated by setup.sh — do not commit this file
 # Regenerate with: ./setup.sh
@@ -107,6 +128,12 @@ resolver_preload {
   ${SYS_PUB_KEY}: ${SYS_JWT}
 }
 
+jetstream {
+  store_dir: /data/jetstream
+  max_mem: 1G
+  max_file: 10G
+}
+
 websocket {
   port: 9222
   no_tls: true
@@ -116,21 +143,14 @@ EOF
 echo "Wrote $ENV_FILE"
 echo "Wrote $NATS_CONF"
 echo ""
-echo "=== Ready! Run these commands: ==="
+echo "=== Ready! ==="
 echo ""
-echo "  # 1. Start Keycloak + NATS"
+echo "  # Start all services (Keycloak + NATS + Auth Service)"
 echo "  cd $SCRIPT_DIR"
 echo "  docker compose up -d"
 echo ""
-echo "  # 2. Wait for Keycloak to be ready (~30-60s)"
+echo "  # Wait for Keycloak to be ready (~30-60s)"
 echo "  docker compose logs -f keycloak  # watch for 'Listening on'"
-echo ""
-echo "  # 3. Start the auth service (on host, not Docker)"
-echo "  cd $SCRIPT_DIR"
-echo "  source .env && go run ../../cmd/server"
-echo ""
-echo "  # 4. (Optional) Start the frontend"
-echo "  cd ../../example/frontend && npm install && npm run dev"
 echo ""
 echo "  ──────────────────────────────────────"
 echo "  Keycloak Admin:   http://localhost:9090  (admin / admin)"

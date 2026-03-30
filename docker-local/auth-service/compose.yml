@@ -24,25 +24,19 @@ services:
       - "9222:9222"   # WebSocket
     volumes:
       - ./nats.conf:/etc/nats/nats.conf:ro
+      - nats-data:/data/jetstream
     command: ["-c", "/etc/nats/nats.conf"]
 
-  # Auth-service runs on the HOST during development (not in this container).
-  # This entry exists so `docker compose` reads .env and the full config is
-  # visible in one place. Start it manually:
-  #
-  #   set -a && source .env && set +a && go run ../../cmd/server
-  #
-  # Why on host? The OIDC issuer in Keycloak tokens is http://localhost:9090/...
-  # go-oidc strictly validates the discovery URL matches the token issuer.
-  # Running on host means auth-service reaches Keycloak at the same URL browsers use.
   auth-service:
-    profiles: ["host"]          # never started by `docker compose up`
-    image: alpine
-    env_file: .env              # makes .env values visible in `docker compose config`
-    environment:
-      # These are the values the auth-service needs (sourced from .env):
-      PORT: ${PORT:-8080}
-      OIDC_ISSUER_URL: ${OIDC_ISSUER_URL}
-      OIDC_AUDIENCE: ${OIDC_AUDIENCE}
-      NATS_ACCOUNT_SEED: ${NATS_ACCOUNT_SEED}
-      NATS_JWT_EXPIRY: ${NATS_JWT_EXPIRY:-1h}
+    build:
+      context: ../..
+      dockerfile: docker-local/auth-service/Dockerfile
+    ports:
+      - "8080:8080"
+    env_file: .env
+    depends_on:
+      keycloak:
+        condition: service_healthy
+
+volumes:
+  nats-data:

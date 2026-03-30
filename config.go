@@ -15,22 +15,29 @@ type Config struct {
 	Port string `mapstructure:"port"`
 
 	// OIDCIssuerURL is your company SSO discovery URL.
-	// Keycloak example: https://sso.company.com/realms/your-realm
-	// Okta example:     https://your-org.okta.com/oauth2/default
 	OIDCIssuerURL string `mapstructure:"oidc_issuer_url"`
 
 	// OIDCAudience is the client_id your app is registered as in SSO.
+	// Checked against the token's "aud" claim by default.
+	// If your Keycloak puts the client_id in "azp" instead, set OIDCVerifyAZP=true.
 	OIDCAudience string `mapstructure:"oidc_audience"`
 
 	// NATSAccountSeed is the SA... private seed for YOUR team's NATS account.
-	// Get this from your NATS infra team. Starts with "SA".
-	// Each team gets their own — it only signs JWTs for your team's account.
 	NATSAccountSeed string `mapstructure:"nats_account_seed"`
 
-	// NATSJWTExpiry controls how long issued JWTs are valid.
-	// NATS will drop the client connection when this expires.
-	// Default: 1 hour. Accepts Go duration strings: "1h", "30m", "2h30m".
+	// NATSJWTExpiry controls how long issued JWTs are valid. Default: 1 hour.
 	NATSJWTExpiry time.Duration `mapstructure:"nats_jwt_expiry"`
+
+	// OIDCVerifyAZP checks the "azp" (authorized party) claim instead of "aud".
+	// Use when Keycloak sets aud="account" but azp=your-client-id. Default: false.
+	OIDCVerifyAZP bool `mapstructure:"oidc_verify_azp"`
+
+	// TLSSkipVerify disables TLS cert verification for the OIDC issuer. Dev only.
+	TLSSkipVerify bool `mapstructure:"tls_skip_verify"`
+
+	// OIDCDiscoveryTimeout is the maximum time allowed for OIDC issuer discovery
+	// and HTTP requests to the JWKS endpoint. Default: 10s.
+	OIDCDiscoveryTimeout time.Duration `mapstructure:"oidc_discovery_timeout"`
 }
 
 // LoadConfig reads configuration from environment variables and optionally
@@ -63,6 +70,9 @@ func LoadConfig() (Config, error) {
 		"oidc_audience",
 		"nats_account_seed",
 		"nats_jwt_expiry",
+		"tls_skip_verify",
+		"oidc_verify_azp",
+		"oidc_discovery_timeout",
 	} {
 		_ = v.BindEnv(key) //nolint:errcheck // BindEnv only fails with zero args
 	}

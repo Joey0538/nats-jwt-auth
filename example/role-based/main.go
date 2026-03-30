@@ -30,7 +30,8 @@ func main() {
 			OIDCIssuerURL:   os.Getenv("OIDC_ISSUER_URL"),
 			OIDCAudience:    os.Getenv("OIDC_AUDIENCE"),
 			NATSAccountSeed: os.Getenv("NATS_ACCOUNT_SEED"),
-			NATSJWTExpiry:   30 * time.Minute, // shorter expiry for sensitive env
+			NATSJWTExpiry:   30 * time.Minute,                       // shorter expiry for sensitive env
+			OIDCVerifyAZP:   os.Getenv("OIDC_VERIFY_AZP") == "true", // Keycloak: verify azp instead of aud
 		},
 
 		// Override: custom logger
@@ -60,6 +61,11 @@ func (p *RoleBasedProvider) GetPermissions(_ context.Context, user natsauth.User
 	//   Auth0:     user.Extra["https://myapp.com/roles"].([]any)
 	roles := extractRoles(user.Extra)
 
+	// No roles at all → reject with 403 (not a 500)
+	if len(roles) == 0 {
+		return natsauth.Permissions{}, natsauth.NewAccessDeniedError("no roles assigned to user")
+	}
+
 	var pubAllow, subAllow []string
 
 	// Everyone gets their personal inbox
@@ -87,18 +93,11 @@ func (p *RoleBasedProvider) GetPermissions(_ context.Context, user natsauth.User
 		case "engineering":
 			subAllow = append(subAllow, "room.engineering", "deploy.>")
 			pubAllow = append(pubAllow, "room.engineering")
-		}
-	}
 
-	// If no roles matched, deny everything except personal inbox
-	if len(pubAllow) == 1 {
-		return natsauth.Permissions{
-			PubAllow: pubAllow,
-			SubAllow: subAllow,
-			// Explicitly deny broad wildcards as a safety net
-			PubDeny: []string{">"},
-			SubDeny: []string{">"},
-		}, nil
+		case "disabled":
+			// Explicitly blocked users — 403
+			return natsauth.Permissions{}, natsauth.NewAccessDeniedError("account is disabled")
+		}
 	}
 
 	return natsauth.Permissions{

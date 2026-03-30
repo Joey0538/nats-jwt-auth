@@ -25,6 +25,7 @@ func main() {
 			OIDCAudience:    os.Getenv("OIDC_AUDIENCE"),
 			NATSAccountSeed: os.Getenv("NATS_ACCOUNT_SEED"),
 			NATSJWTExpiry:   time.Hour,
+			OIDCVerifyAZP:   os.Getenv("OIDC_VERIFY_AZP") == "true", // Keycloak: verify azp instead of aud
 		},
 		natsauth.WithPermissionsProvider(
 			natsauth.PermissionsProviderFunc(func(_ context.Context, user natsauth.UserClaims) (natsauth.Permissions, error) {

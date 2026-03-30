@@ -36,6 +36,13 @@ func main() {
 		OIDCAudience:    os.Getenv("OIDC_AUDIENCE"),     // required
 		NATSAccountSeed: os.Getenv("NATS_ACCOUNT_SEED"), // required
 		NATSJWTExpiry:   15 * time.Minute,               // default: 1h — shorter = more frequent re-auth
+
+		// Keycloak often sets aud="account" and puts your client_id in "azp".
+		// Set this to true to verify azp instead of aud.
+		OIDCVerifyAZP: os.Getenv("OIDC_VERIFY_AZP") == "true",
+
+		// Skip TLS cert verification for OIDC issuer (dev only — self-signed certs)
+		TLSSkipVerify: os.Getenv("TLS_SKIP_VERIFY") == "true",
 	}
 
 	// -----------------------------------------------------------------------
@@ -126,12 +133,34 @@ func (p *DBPermissionsProvider) GetPermissions(_ context.Context, user natsauth.
 	//   user.Extra            — map of any other OIDC claims (roles, groups, etc.)
 	// -----------------------------------------------------------------------
 
+	// -----------------------------------------------------------------------
+	// Error handling:
+	//
+	//   return natsauth.NewAccessDeniedError("reason") → 403 Forbidden
+	//   return fmt.Errorf("db error: %w", err)         → 500 Internal Server Error
+	// -----------------------------------------------------------------------
+
+	// Example: block deactivated users with a 403
+	// active, err := p.db.QueryRowContext(ctx,
+	//     "SELECT active FROM users WHERE id = $1", user.Subject).Scan(&active)
+	// if !active {
+	//     return natsauth.Permissions{}, natsauth.NewAccessDeniedError("account is deactivated")
+	// }
+
 	// Example: look up rooms from your DB
 	// rooms, err := p.db.QueryContext(ctx,
 	//     "SELECT room_id FROM room_members WHERE user_id = $1", user.Subject)
+	// if err != nil {
+	//     return natsauth.Permissions{}, err  // generic error → 500
+	// }
 
 	// Simulated DB result
 	rooms := []string{"room.general", "room.engineering"}
+
+	// No rooms assigned → reject with 403 (not 500)
+	if len(rooms) == 0 {
+		return natsauth.Permissions{}, natsauth.NewAccessDeniedError("no rooms assigned")
+	}
 	subs := make([]string, 0, len(rooms)+1)
 	pubs := make([]string, 0, len(rooms)+1)
 
