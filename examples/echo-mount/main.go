@@ -14,18 +14,18 @@ import (
 	"github.com/labstack/echo/v4"
 
 	natsauth "github.com/joey0538/nats-jwt-auth"
+	"github.com/joey0538/nats-jwt-auth/echoserver"
 )
 
 func main() {
 	ctx := context.Background()
 
-	srv, err := natsauth.NewServer(ctx,
+	srv, err := echoserver.New(ctx,
 		natsauth.Config{
 			OIDCIssuerURL:   os.Getenv("OIDC_ISSUER_URL"),
 			OIDCAudience:    os.Getenv("OIDC_AUDIENCE"),
 			NATSAccountSeed: os.Getenv("NATS_ACCOUNT_SEED"),
 			NATSJWTExpiry:   time.Hour,
-			OIDCVerifyAZP:   os.Getenv("OIDC_VERIFY_AZP") == "true", // Keycloak: verify azp instead of aud
 		},
 		natsauth.WithPermissionsProvider(
 			natsauth.PermissionsProviderFunc(func(_ context.Context, user natsauth.UserClaims) (natsauth.Permissions, error) {
@@ -45,9 +45,6 @@ func main() {
 	})
 
 	// Mount natsauth routes under /nats prefix
-	// This adds:
-	//   POST /nats/auth    — the auth endpoint frontends call
-	//   GET  /nats/health  — health check for the auth subsystem
 	srv.MountOn(e, "/nats")
 
 	log.Fatal(e.Start(":8080"))

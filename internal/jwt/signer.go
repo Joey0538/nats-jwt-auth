@@ -49,11 +49,10 @@ type UserPermissions struct {
 
 // Sign creates a NATS user JWT bound to the given user public key.
 // The JWT is signed by the account key and includes the specified permissions.
+//
+// The caller (Authenticator.Authenticate) is responsible for validating the
+// user public key before calling Sign.
 func (s *Signer) Sign(userPubKey string, userID string, perms UserPermissions) (string, error) {
-	if !nkeys.IsValidPublicUserKey(userPubKey) {
-		return "", fmt.Errorf("jwt: invalid user public key %q (must start with U)", userPubKey)
-	}
-
 	claims := jwt.NewUserClaims(userPubKey)
 	claims.Name = userID
 	claims.IssuerAccount = s.accountPubKey

@@ -4,16 +4,17 @@ import (
 	"context"
 	"log"
 
-	natsauth "github.com/joey0538/nats-jwt-auth"
+	"github.com/joey0538/nats-jwt-auth/echoserver"
+	"github.com/joey0538/nats-jwt-auth/viperconfig"
 )
 
 func main() {
-	cfg, err := natsauth.LoadConfig()
+	cfg, err := viperconfig.LoadConfig()
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	srv, err := natsauth.NewServer(context.Background(), cfg)
+	srv, err := echoserver.New(context.Background(), cfg)
 	if err != nil {
 		log.Fatal(err)
 	}

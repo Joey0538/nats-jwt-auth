@@ -98,7 +98,7 @@ set -a && source .env && set +a && go run ../../cmd/server
 ### Step 4: Start the frontend
 
 ```bash
-cd ../../example/frontend
+cd ../../examples/frontend
 npm install
 npm run dev
 # Open http://localhost:3000, click "Login with Keycloak"
@@ -245,22 +245,35 @@ websocket {
 
 > **Note:** the field is `resolver_preload` (no trailing 's'), and it must include both your app account AND the SYS account.
 
+## Package Structure
+
+The library is split into independent Go modules so teams only download what they need:
+
+| Import path | What it provides | Direct deps |
+|---|---|---|
+| `github.com/joey0538/nats-jwt-auth` | `Authenticator`, `Config`, typed errors, `PermissionsProvider` | go-oidc, nats-io/jwt, nats-io/nkeys |
+| `github.com/joey0538/nats-jwt-auth/echoserver` | Batteries-included Echo HTTP server | core + echo |
+| `github.com/joey0538/nats-jwt-auth/viperconfig` | `LoadConfig()` from env vars / .env files | core + viper + mapstructure |
+
+Teams using Gin, Chi, or net/http import **only the core** — no Echo or Viper in their dependency tree.
+
 ## Customization Guide
 
-Every team uses the same library but customises these things. See `example/` for complete runnable code.
+Every team uses the same library but customises these things. See `examples/` for complete runnable code.
 
 ### 1. Config loading
 
 ```go
-// Option A: LoadConfig() — reads env vars + .env files via Viper. Zero boilerplate.
-cfg, err := natsauth.LoadConfig()
+// Option A: viperconfig.LoadConfig() — reads env vars + .env files. Zero boilerplate.
+import "github.com/joey0538/nats-jwt-auth/viperconfig"
+cfg, err := viperconfig.LoadConfig()
 
-// Option B: Build manually — full control, no Viper dependency in your code.
+// Option B: Build manually — full control, no Viper dependency.
 cfg := natsauth.Config{
-    OIDCIssuerURL:   "https://sso.company.com/realms/my-realm",
-    OIDCAudience:    "my-chat-app",
-    NATSAccountSeed: "SA...",
-    NATSJWTExpiry:   15 * time.Minute,  // default: 1h — shorter = more frequent re-auth
+    OIDCIssuerURL:   os.Getenv("OIDC_ISSUER_URL"),
+    OIDCAudience:    os.Getenv("OIDC_AUDIENCE"),
+    NATSAccountSeed: os.Getenv("NATS_ACCOUNT_SEED"),
+    NATSJWTExpiry:   15 * time.Minute,  // default: 1h
     Port:            "9090",             // default: "8080"
 }
 ```
@@ -327,7 +340,7 @@ func (p *RoleBasedProvider) GetPermissions(_ context.Context, user natsauth.User
 }
 ```
 
-See `example/role-based/` for the complete implementation with role extraction helpers.
+See `examples/role-based/` for the complete implementation with role extraction helpers.
 
 ### 3. Permissions — Allow, Deny, and Wildcards
 
@@ -417,46 +430,69 @@ logger := slog.New(slog.NewJSONHandler(f, nil))
 natsauth.WithLogger(logger)
 ```
 
-### 7. Run mode
+### 7. Using Authenticator directly (any framework)
 
 ```go
-// Option A: Standalone — blocks until SIGTERM, handles graceful shutdown.
+// No Echo dependency — use Gin, Chi, net/http, or anything else.
+auth, err := natsauth.NewAuthenticator(ctx, cfg,
+    natsauth.WithPermissionsProvider(myProvider),
+)
+
+// In your handler:
+result, err := auth.Authenticate(ctx, ssoToken, natsPublicKey)
+// result.NATSJWT  — signed NATS JWT
+// result.User     — validated identity from SSO
+
+// Map errors to HTTP status codes:
+//   errors.Is(err, natsauth.ErrMissingToken)  → 400
+//   errors.Is(err, natsauth.ErrTokenExpired)   → 401
+//   errors.Is(err, natsauth.ErrAccessDenied)   → 403
+```
+
+See `examples/gin/` and `examples/net-http/` for complete framework-agnostic examples.
+
+### 8. Echo server (batteries-included)
+
+```go
+import "github.com/joey0538/nats-jwt-auth/echoserver"
+
+// Option A: Standalone — blocks until SIGTERM.
+srv, err := echoserver.New(ctx, cfg, natsauth.WithPermissionsProvider(myProvider))
 srv.Run()
 
 // Option B: Mount into existing Echo server.
-e := echo.New()
-e.GET("/api/v1/rooms", listRoomsHandler)  // your existing routes
-srv.MountOn(e, "/nats")                   // adds POST /nats/auth + GET /nats/health
-e.Start(":8080")
+srv.MountOn(e, "/nats")  // adds POST /nats/auth + GET /nats/health
 ```
 
-### 8. Putting it all together
+### 9. Putting it all together
 
 ```go
-srv, err := natsauth.NewServer(ctx,
-    natsauth.Config{
-        OIDCIssuerURL:   os.Getenv("OIDC_ISSUER_URL"),
-        OIDCAudience:    os.Getenv("OIDC_AUDIENCE"),
-        NATSAccountSeed: os.Getenv("NATS_ACCOUNT_SEED"),
-        NATSJWTExpiry:   30 * time.Minute,
-        Port:            "9090",
-    },
+import (
+    natsauth "github.com/joey0538/nats-jwt-auth"
+    "github.com/joey0538/nats-jwt-auth/echoserver"
+    "github.com/joey0538/nats-jwt-auth/viperconfig"
+)
+
+cfg, err := viperconfig.LoadConfig()
+srv, err := echoserver.New(ctx, cfg,
     natsauth.WithLogger(myLogger),
     natsauth.WithPermissionsProvider(&MyDBProvider{db: db}),
 )
 ```
 
-See `example/full/` for a single file showing every override together.
+See `examples/echo-full/` for a single file showing every override together.
 
 ### Runnable examples
 
 | Example | Path | What it shows |
 |---|---|---|
-| Minimal | `example/main.go` | LoadConfig + inline PermissionsProviderFunc |
-| Mount | `example/mount/main.go` | Embedding into existing Echo server |
-| Role-based | `example/role-based/main.go` | SSO roles/groups to NATS permissions |
-| Full | `example/full/main.go` | Every override in one place |
-| Frontend | `example/frontend/` | Next.js + Keycloak + NATS WebSocket |
+| Basic | `examples/basic/` | viperconfig + echoserver + inline permissions |
+| Echo mount | `examples/echo-mount/` | Embedding into existing Echo server |
+| Echo full | `examples/echo-full/` | Every override + MountOn |
+| Role-based | `examples/role-based/` | SSO roles/groups to NATS permissions |
+| Gin | `examples/gin/` | Gin framework + custom response format |
+| net/http | `examples/net-http/` | stdlib net/http, zero framework deps |
+| Frontend | `examples/frontend/` | Next.js + Keycloak + NATS WebSocket |
 
 ## Room Invites (mid-session permission update)
 
@@ -473,20 +509,20 @@ NATS permissions are locked at connection time. When a user gets invited to a ne
 
 | Field | Type | Required | Default | Description |
 |---|---|---|---|---|
-| `Port` | `string` | No | `"8080"` | HTTP listen port |
+| `Port` | `string` | No | `"8080"` | HTTP listen port (echoserver only) |
 | `OIDCIssuerURL` | `string` | Yes | -- | OIDC discovery URL |
 | `OIDCAudience` | `string` | Yes | -- | OIDC client_id |
 | `NATSAccountSeed` | `string` | Yes | -- | `SA...` account private seed |
 | `NATSJWTExpiry` | `time.Duration` | No | `1h` | JWT lifetime |
-| `OIDCVerifyAZP` | `bool` | No | `false` | Verify `azp` claim instead of `aud` (for Keycloak) |
 | `TLSSkipVerify` | `bool` | No | `false` | Skip TLS cert verification for OIDC issuer (dev only) |
+| `OIDCDiscoveryTimeout` | `time.Duration` | No | `10s` | Max time for OIDC issuer discovery |
 
-### LoadConfig()
+### viperconfig.LoadConfig()
 
-Reads config from environment variables via Viper. Also checks `.env` files in current directory and `/etc/nats-auth/`.
+Reads config from environment variables via Viper. Also checks `.env` files in current directory and `/etc/nats-auth/`. Import `github.com/joey0538/nats-jwt-auth/viperconfig`.
 
 ```go
-cfg, err := natsauth.LoadConfig()
+cfg, err := viperconfig.LoadConfig()
 ```
 
 | Env Var | Maps To |
@@ -496,8 +532,8 @@ cfg, err := natsauth.LoadConfig()
 | `NATS_ACCOUNT_SEED` | `Config.NATSAccountSeed` |
 | `NATS_JWT_EXPIRY` | `Config.NATSJWTExpiry` |
 | `PORT` | `Config.Port` |
-| `OIDC_VERIFY_AZP` | `Config.OIDCVerifyAZP` |
 | `TLS_SKIP_VERIFY` | `Config.TLSSkipVerify` |
+| `OIDC_DISCOVERY_TIMEOUT` | `Config.OIDCDiscoveryTimeout` |
 
 ### Options
 
@@ -567,20 +603,32 @@ type Permissions struct {
 
 ```
 nats-jwt-auth/
-├── config.go                      # Config struct + LoadConfig() via Viper
-├── decode.go                      # Viper duration decode hook
+├── go.mod                         # Core module (3 deps: go-oidc, nats-io/jwt, nats-io/nkeys)
+├── authenticator.go               # Authenticator — framework-agnostic core
+├── config.go                      # Config struct (no Viper dependency)
+├── errors.go                      # Typed sentinel errors for HTTP status mapping
 ├── permissions.go                 # PermissionsProvider interface
-├── server.go                      # NewServer(), Run(), MountOn()
 ├── internal/
 │   ├── oidc/validator.go          # OIDC token verification against SSO JWKS
 │   └── jwt/signer.go             # NATS JWT signing with account keypair
-├── cmd/server/main.go             # Standalone binary
-├── example/
-│   ├── main.go                    # Minimal: LoadConfig + inline permissions
-│   ├── mount/main.go             # Embed into existing Echo server
+├── echoserver/                    # Separate module: batteries-included Echo server
+│   ├── go.mod
+│   └── server.go                  # Server.Run(), Server.MountOn()
+├── viperconfig/                   # Separate module: env var + .env config loading
+│   ├── go.mod
+│   └── config.go                  # LoadConfig() via Viper
+├── cmd/server/                    # Standalone binary (echoserver + viperconfig)
+│   ├── go.mod
+│   └── main.go
+├── examples/
+│   ├── go.mod                     # Shared by all Go examples
+│   ├── basic/main.go             # viperconfig + echoserver + inline permissions
+│   ├── echo-mount/main.go        # Embed into existing Echo server
+│   ├── echo-full/main.go         # Every override in one place
 │   ├── role-based/main.go        # SSO roles/groups → NATS permissions
-│   ├── full/main.go              # Every override in one place
-│   └── frontend/                 # Next.js chat demo (Keycloak + NATS)
+│   ├── gin/main.go               # Gin framework + custom response format
+│   ├── net-http/main.go          # stdlib net/http, zero framework
+│   └── frontend/                  # Next.js chat demo (Keycloak + NATS)
 └── docker-local/auth-service/
     ├── setup.sh                   # Generates NATS keys + .env + nats.conf
     ├── compose.yml                # Keycloak + NATS
@@ -589,11 +637,13 @@ nats-jwt-auth/
     └── .env.example               # All env vars documented
 ```
 
-`internal/` is intentional — other teams import the public API (`natsauth.NewServer`, `natsauth.Config`, etc.) and cannot accidentally depend on implementation details.
+`internal/` is intentional — other teams import the public API (`natsauth.NewAuthenticator`, `natsauth.Config`, etc.) and cannot accidentally depend on implementation details.
+
+Each submodule (`echoserver/`, `viperconfig/`, `examples/gin/`, `examples/net-http/`) has its own `go.mod` with `replace` directives for local development. Teams only download the dependencies they actually import.
 
 ## Frontend Integration (browser)
 
-See `example/frontend/` for a complete Next.js demo. The key flow:
+See `examples/frontend/` for a complete Next.js demo. The key flow:
 
 ```typescript
 import { createUser } from "nkeys.js";

@@ -2,104 +2,42 @@ package natsauth
 
 import (
 	"fmt"
-	"strings"
 	"time"
-
-	"github.com/spf13/viper"
 )
 
 // Config holds everything a team needs to provide to run their own
-// instance of the NATS auth service. Each team has their own values here.
+// instance of the NATS auth service.
+//
+// Zero values for optional fields use sensible defaults (applied
+// internally by NewAuthenticator):
+//
+//	Port                 → "8080"
+//	NATSJWTExpiry        → 1h
+//	OIDCDiscoveryTimeout → 10s
 type Config struct {
-	// Port the HTTP server listens on. Default: 8080
-	Port string `mapstructure:"port"`
+	// Port the HTTP server listens on. Only used by echoserver.Server.
+	// Zero value defaults to "8080".
+	Port string
 
-	// OIDCIssuerURL is your company SSO discovery URL.
-	OIDCIssuerURL string `mapstructure:"oidc_issuer_url"`
+	// OIDCIssuerURL is your company SSO discovery URL (required).
+	OIDCIssuerURL string
 
-	// OIDCAudience is the client_id your app is registered as in SSO.
-	// Checked against the token's "aud" claim by default.
-	// If your Keycloak puts the client_id in "azp" instead, set OIDCVerifyAZP=true.
-	OIDCAudience string `mapstructure:"oidc_audience"`
+	// OIDCAudience is the client_id your app is registered as in SSO (required).
+	OIDCAudience string
 
-	// NATSAccountSeed is the SA... private seed for YOUR team's NATS account.
-	NATSAccountSeed string `mapstructure:"nats_account_seed"`
+	// NATSAccountSeed is the SA... private seed for YOUR team's NATS account (required).
+	NATSAccountSeed string
 
-	// NATSJWTExpiry controls how long issued JWTs are valid. Default: 1 hour.
-	NATSJWTExpiry time.Duration `mapstructure:"nats_jwt_expiry"`
-
-	// OIDCVerifyAZP checks the "azp" (authorized party) claim instead of "aud".
-	// Use when Keycloak sets aud="account" but azp=your-client-id. Default: false.
-	OIDCVerifyAZP bool `mapstructure:"oidc_verify_azp"`
+	// NATSJWTExpiry controls how long issued JWTs are valid.
+	// Zero value defaults to 1 hour.
+	NATSJWTExpiry time.Duration
 
 	// TLSSkipVerify disables TLS cert verification for the OIDC issuer. Dev only.
-	TLSSkipVerify bool `mapstructure:"tls_skip_verify"`
+	TLSSkipVerify bool
 
-	// OIDCDiscoveryTimeout is the maximum time allowed for OIDC issuer discovery
-	// and HTTP requests to the JWKS endpoint. Default: 10s.
-	OIDCDiscoveryTimeout time.Duration `mapstructure:"oidc_discovery_timeout"`
-}
-
-// LoadConfig reads configuration from environment variables and optionally
-// from .env / config files. Env vars like OIDC_ISSUER_URL map directly to
-// Config fields via mapstructure tags.
-//
-// Search paths for config files (optional, env vars always take precedence):
-//   - ./.env
-//   - /etc/nats-auth/.env
-//
-// Usage:
-//
-//	cfg, err := natsauth.LoadConfig()
-//	if err != nil {
-//	    log.Fatal(err)
-//	}
-//	srv, err := natsauth.NewServer(ctx, cfg)
-func LoadConfig() (Config, error) {
-	v := viper.New()
-
-	// Env vars: OIDC_ISSUER_URL, OIDC_AUDIENCE, NATS_ACCOUNT_SEED, etc.
-	v.AutomaticEnv()
-	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
-
-	// Bind all config keys to their env var names so Unmarshal picks them up.
-	// AutomaticEnv only works with Get(), not Unmarshal — BindEnv fixes that.
-	for _, key := range []string{
-		"port",
-		"oidc_issuer_url",
-		"oidc_audience",
-		"nats_account_seed",
-		"nats_jwt_expiry",
-		"tls_skip_verify",
-		"oidc_verify_azp",
-		"oidc_discovery_timeout",
-	} {
-		_ = v.BindEnv(key) //nolint:errcheck // BindEnv only fails with zero args
-	}
-
-	// Also read from .env / config file if present
-	v.SetConfigName(".env")
-	v.SetConfigType("env")
-	v.AddConfigPath(".")
-	v.AddConfigPath("/etc/nats-auth/")
-	_ = v.ReadInConfig() //nolint:errcheck // optional — env vars take precedence
-
-	// Defaults
-	v.SetDefault("port", "8080")
-	v.SetDefault("nats_jwt_expiry", "1h")
-
-	var cfg Config
-	if err := v.Unmarshal(&cfg, viper.DecodeHook(
-		mapstructureDurationHook(),
-	)); err != nil {
-		return Config{}, fmt.Errorf("natsauth: failed to unmarshal config: %w", err)
-	}
-
-	if err := cfg.validate(); err != nil {
-		return Config{}, err
-	}
-
-	return cfg, nil
+	// OIDCDiscoveryTimeout is the maximum time allowed for OIDC issuer discovery.
+	// Zero value defaults to 10s.
+	OIDCDiscoveryTimeout time.Duration
 }
 
 func (c *Config) withDefaults() {
@@ -109,17 +47,20 @@ func (c *Config) withDefaults() {
 	if c.NATSJWTExpiry == 0 {
 		c.NATSJWTExpiry = time.Hour
 	}
+	if c.OIDCDiscoveryTimeout == 0 {
+		c.OIDCDiscoveryTimeout = 10 * time.Second
+	}
 }
 
 func (c *Config) validate() error {
 	if c.OIDCIssuerURL == "" {
-		return fmt.Errorf("natsauth: OIDCIssuerURL is required (env: OIDC_ISSUER_URL)")
+		return fmt.Errorf("natsauth: OIDCIssuerURL is required")
 	}
 	if c.OIDCAudience == "" {
-		return fmt.Errorf("natsauth: OIDCAudience is required (env: OIDC_AUDIENCE)")
+		return fmt.Errorf("natsauth: OIDCAudience is required")
 	}
 	if c.NATSAccountSeed == "" {
-		return fmt.Errorf("natsauth: NATSAccountSeed is required (env: NATS_ACCOUNT_SEED)")
+		return fmt.Errorf("natsauth: NATSAccountSeed is required")
 	}
 	return nil
 }

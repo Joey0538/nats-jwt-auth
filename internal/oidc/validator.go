@@ -11,8 +11,6 @@ import (
 	"github.com/coreos/go-oidc/v3/oidc"
 )
 
-const defaultDiscoveryTimeout = 10 * time.Second
-
 // Claims holds the validated identity extracted from an OIDC token.
 type Claims struct {
 	Extra             map[string]interface{}
@@ -33,12 +31,8 @@ type ValidatorConfig struct {
 	Audience      string
 	TLSSkipVerify bool
 
-	// VerifyAZP checks the "azp" (authorized party) claim instead of "aud".
-	// Keycloak often sets aud to "account" and puts the client_id in azp.
-	VerifyAZP bool
-
 	// DiscoveryTimeout is the maximum time allowed for OIDC issuer discovery
-	// and HTTP requests to the JWKS endpoint. Default: 10s.
+	// and HTTP requests to the JWKS endpoint. Must be set by the caller.
 	DiscoveryTimeout time.Duration
 }
 
@@ -47,16 +41,12 @@ type Validator struct {
 	verifier   *oidc.IDTokenVerifier
 	httpClient *http.Client
 	audience   string
-	verifyAZP  bool
 }
 
 // NewValidator connects to the OIDC issuer at startup and fetches its
 // JWKS keys. Fails fast if the issuer is unreachable.
 func NewValidator(ctx context.Context, cfg ValidatorConfig) (*Validator, error) {
 	timeout := cfg.DiscoveryTimeout
-	if timeout == 0 {
-		timeout = defaultDiscoveryTimeout
-	}
 
 	var httpClient *http.Client
 
@@ -89,19 +79,12 @@ func NewValidator(ctx context.Context, cfg ValidatorConfig) (*Validator, error) 
 		ClientID: cfg.Audience,
 	}
 
-	// When verifying azp instead of aud, tell go-oidc to skip its aud check.
-	// We'll verify azp ourselves after token verification.
-	if cfg.VerifyAZP {
-		oidcConfig.SkipClientIDCheck = true
-	}
-
 	verifier := provider.Verifier(oidcConfig)
 
 	return &Validator{
 		verifier:   verifier,
 		httpClient: httpClient,
 		audience:   cfg.Audience,
-		verifyAZP:  cfg.VerifyAZP,
 	}, nil
 }
 
@@ -122,29 +105,16 @@ func (v *Validator) Validate(ctx context.Context, rawToken string) (Claims, erro
 		return Claims{}, fmt.Errorf("oidc: token verification failed: %w", err)
 	}
 
-	// Double-check expiry explicitly (belt + suspenders)
-	if idToken.Expiry.Before(time.Now()) {
-		return Claims{}, ErrTokenExpired
-	}
-
 	var tokenClaims struct {
 		Email             string `json:"email"`
 		Name              string `json:"name"`
 		PreferredUsername string `json:"preferred_username"`
 		GivenName         string `json:"given_name"`
 		FamilyName        string `json:"family_name"`
-		AZP               string `json:"azp"`
 	}
 
 	if err := idToken.Claims(&tokenClaims); err != nil {
 		return Claims{}, fmt.Errorf("oidc: failed to parse token claims: %w", err)
-	}
-
-	// Verify azp matches the expected audience when aud check is skipped
-	if v.verifyAZP {
-		if tokenClaims.AZP != v.audience {
-			return Claims{}, fmt.Errorf("oidc: azp claim %q does not match expected audience %q", tokenClaims.AZP, v.audience)
-		}
 	}
 
 	// Parse all claims into Extra for teams that need custom fields

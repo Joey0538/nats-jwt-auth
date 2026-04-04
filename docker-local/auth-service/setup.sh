@@ -104,9 +104,6 @@ NATS_OPERATOR_JWT=${OPERATOR_JWT}
 PORT=8080
 NATS_JWT_EXPIRY=1h
 
-# Keycloak puts client_id in azp instead of aud — set to true for Keycloak
-OIDC_VERIFY_AZP=true
-
 # Skip TLS cert verification for OIDC issuer (dev only — self-signed certs)
 TLS_SKIP_VERIFY=false
 EOF
