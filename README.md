@@ -284,7 +284,7 @@ cfg := natsauth.Config{
 
 ```go
 natsauth.WithPermissionsProvider(
-    natsauth.PermissionsProviderFunc(func(ctx context.Context, user natsauth.UserClaims) (natsauth.Permissions, error) {
+    natsauth.PermissionsProviderFunc(func(ctx context.Context, user *natsauth.UserClaims) (natsauth.Permissions, error) {
         rooms, err := db.GetRoomsForUser(ctx, user.Subject)
         if err != nil {
             return natsauth.Permissions{}, err
@@ -305,7 +305,7 @@ type DBPermissionsProvider struct {
     db *sql.DB
 }
 
-func (p *DBPermissionsProvider) GetPermissions(ctx context.Context, user natsauth.UserClaims) (natsauth.Permissions, error) {
+func (p *DBPermissionsProvider) GetPermissions(ctx context.Context, user *natsauth.UserClaims) (natsauth.Permissions, error) {
     rows, err := p.db.QueryContext(ctx, "SELECT room_id FROM room_members WHERE user_id = $1", user.Subject)
     // ... build permissions from DB results
 }
@@ -317,7 +317,7 @@ natsauth.WithPermissionsProvider(&DBPermissionsProvider{db: db})
 **Pattern C: Role-based from SSO claims** — use roles/groups from the OIDC token.
 
 ```go
-func (p *RoleBasedProvider) GetPermissions(_ context.Context, user natsauth.UserClaims) (natsauth.Permissions, error) {
+func (p *RoleBasedProvider) GetPermissions(_ context.Context, user *natsauth.UserClaims) (natsauth.Permissions, error) {
     // Keycloak roles live in user.Extra["realm_access"]["roles"]
     // Okta groups live in user.Extra["groups"]
     roles := extractRoles(user.Extra)
@@ -368,7 +368,7 @@ Deny always wins over Allow.
 Return `ErrAccessDenied` or `NewAccessDeniedError("reason")` from your `PermissionsProvider` to reject a user with **403 Forbidden**. Any other error returns **500 Internal Server Error**.
 
 ```go
-func (p *MyProvider) GetPermissions(ctx context.Context, user natsauth.UserClaims) (natsauth.Permissions, error) {
+func (p *MyProvider) GetPermissions(ctx context.Context, user *natsauth.UserClaims) (natsauth.Permissions, error) {
     // User is banned → 403
     if isBanned(user.Subject) {
         return natsauth.Permissions{}, natsauth.NewAccessDeniedError("account is deactivated")
@@ -394,7 +394,7 @@ Response on 403: `{ "message": "natsauth: access denied: account is deactivated"
 ### 5. UserClaims — what you get from the SSO token
 
 ```go
-func myProvider(ctx context.Context, user natsauth.UserClaims) (natsauth.Permissions, error) {
+func myProvider(ctx context.Context, user *natsauth.UserClaims) (natsauth.Permissions, error) {
     user.Subject          // "1d85aa54-c9f5-4310-..."  — unique ID
     user.Email            // "alice@company.com"
     user.Name             // "Alice Engineer"
@@ -414,20 +414,22 @@ func myProvider(ctx context.Context, user natsauth.UserClaims) (natsauth.Permiss
 
 ### 6. Logger
 
-```go
-// Default: JSON to stdout
-// Override with any *slog.Logger:
+By default the library logs to `slog.Default()` — whatever your app has configured globally. Most teams don't need to do anything.
 
-// Text format to stderr with debug level
+If you want library logs routed to a separate logger (e.g. an auth audit log):
+
+```go
 logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
     Level: slog.LevelDebug,
 }))
 natsauth.WithLogger(logger)
+```
 
-// JSON to a file
-f, _ := os.OpenFile("auth.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-logger := slog.New(slog.NewJSONHandler(f, nil))
-natsauth.WithLogger(logger)
+If not provided, the library respects your app's global logger:
+
+```go
+// At app startup — the library automatically uses this
+slog.SetDefault(myAppLogger)
 ```
 
 ### 7. Using Authenticator directly (any framework)
@@ -475,7 +477,7 @@ import (
 
 cfg, err := viperconfig.LoadConfig()
 srv, err := echoserver.New(ctx, cfg,
-    natsauth.WithLogger(myLogger),
+    natsauth.WithLogger(myLogger),           // optional, defaults to slog.Default()
     natsauth.WithPermissionsProvider(&MyDBProvider{db: db}),
 )
 ```
@@ -540,13 +542,13 @@ cfg, err := viperconfig.LoadConfig()
 | Option | Description |
 |---|---|
 | `WithPermissionsProvider(p)` | Custom room/ACL lookup. Default: allows `chat.>` and `user.<sub>.>` |
-| `WithLogger(l)` | Custom `*slog.Logger` |
+| `WithLogger(l)` | Custom `*slog.Logger`. Default: `slog.Default()` |
 
 ### PermissionsProvider interface
 
 ```go
 type PermissionsProvider interface {
-    GetPermissions(ctx context.Context, user UserClaims) (Permissions, error)
+    GetPermissions(ctx context.Context, user *UserClaims) (Permissions, error)
 }
 ```
 

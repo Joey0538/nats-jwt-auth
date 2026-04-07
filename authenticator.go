@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 
 	"github.com/nats-io/nkeys"
 
@@ -32,14 +31,14 @@ type Authenticator struct {
 	validator   *internaloidc.Validator
 	signer      *internaljwt.Signer
 	permissions PermissionsProvider
-	logger      *slog.Logger
+	logger      *slog.Logger // nil means use slog.Default()
 }
 
 // AuthResult is returned by Authenticate on success. Teams use this to
 // build their own HTTP response in whatever format they need.
 type AuthResult struct {
 	// User holds the validated identity from the SSO token.
-	User UserClaims
+	User *UserClaims
 
 	// NATSJWT is the signed NATS user JWT. Pass this to the client
 	// so it can connect to NATS with it.
@@ -59,11 +58,21 @@ func WithPermissionsProvider(p PermissionsProvider) Option {
 	}
 }
 
-// WithLogger lets teams bring their own slog.Logger.
+// WithLogger overrides the default logger (slog.Default).
+// Use this when you want library logs to go somewhere different
+// from your application's default logger (e.g. a separate auth audit log).
 func WithLogger(l *slog.Logger) Option {
 	return func(a *Authenticator) {
 		a.logger = l
 	}
+}
+
+// log returns the configured logger, falling back to slog.Default().
+func (a *Authenticator) log() *slog.Logger {
+	if a.logger != nil {
+		return a.logger
+	}
+	return slog.Default()
 }
 
 // NewAuthenticator creates the framework-agnostic authenticator.
@@ -85,7 +94,6 @@ func NewAuthenticator(ctx context.Context, cfg Config, opts ...Option) (*Authent
 
 	a := &Authenticator{
 		permissions: DefaultPermissionsProvider{},
-		logger:      slog.New(slog.NewJSONHandler(os.Stdout, nil)),
 	}
 
 	for _, opt := range opts {
@@ -110,11 +118,6 @@ func NewAuthenticator(ctx context.Context, cfg Config, opts ...Option) (*Authent
 	a.signer = signer
 
 	return a, nil
-}
-
-// Logger returns the authenticator's logger.
-func (a *Authenticator) Logger() *slog.Logger {
-	return a.logger
 }
 
 // Authenticate validates the SSO token, resolves permissions, and signs a
@@ -145,14 +148,14 @@ func (a *Authenticator) Authenticate(ctx context.Context, ssoToken, natsPublicKe
 	oidcClaims, err := a.validator.Validate(ctx, ssoToken)
 	if err != nil {
 		if errors.Is(err, internaloidc.ErrTokenExpired) {
-			a.logger.Warn("SSO token expired", "error", err)
+			a.log().Warn("SSO token expired", "error", err)
 			return nil, ErrTokenExpired
 		}
-		a.logger.Error("OIDC validation failed", "error", err)
+		a.log().Error("OIDC validation failed", "error", err)
 		return nil, ErrInvalidToken
 	}
 
-	userClaims := UserClaims{
+	userClaims := &UserClaims{
 		Subject:           oidcClaims.Subject,
 		Email:             oidcClaims.Email,
 		Name:              oidcClaims.Name,
@@ -166,10 +169,10 @@ func (a *Authenticator) Authenticate(ctx context.Context, ssoToken, natsPublicKe
 	perms, err := a.permissions.GetPermissions(ctx, userClaims)
 	if err != nil {
 		if errors.Is(err, ErrAccessDenied) {
-			a.logger.Warn("access denied", "error", err, "subject", userClaims.Subject)
+			a.log().Warn("access denied", "error", err, "subject", userClaims.Subject)
 			return nil, err
 		}
-		a.logger.Error("permissions lookup failed", "error", err, "subject", userClaims.Subject)
+		a.log().Error("permissions lookup failed", "error", err, "subject", userClaims.Subject)
 		return nil, fmt.Errorf("%w: %w", ErrPermissionLookup, err)
 	}
 
@@ -181,14 +184,9 @@ func (a *Authenticator) Authenticate(ctx context.Context, ssoToken, natsPublicKe
 		SubDeny:  perms.SubDeny,
 	})
 	if err != nil {
-		a.logger.Error("JWT signing failed", "error", err)
+		a.log().Error("JWT signing failed", "error", err)
 		return nil, fmt.Errorf("%w: %w", ErrSigningFailed, err)
 	}
-
-	a.logger.Info("auth success",
-		"username", userClaims.PreferredUsername,
-		"subject", userClaims.Subject,
-	)
 
 	return &AuthResult{
 		User:    userClaims,

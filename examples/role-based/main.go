@@ -8,7 +8,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"log/slog"
 	"os"
 	"time"
 
@@ -17,11 +16,6 @@ import (
 )
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-		Level:     slog.LevelDebug,
-		AddSource: true,
-	}))
-
 	srv, err := echoserver.New(context.Background(),
 		natsauth.Config{
 			OIDCIssuerURL:   os.Getenv("OIDC_ISSUER_URL"),
@@ -29,7 +23,6 @@ func main() {
 			NATSAccountSeed: os.Getenv("NATS_ACCOUNT_SEED"),
 			NATSJWTExpiry:   30 * time.Minute,
 		},
-		natsauth.WithLogger(logger),
 		natsauth.WithPermissionsProvider(&RoleBasedProvider{}),
 	)
 	if err != nil {
@@ -42,7 +35,7 @@ func main() {
 
 type RoleBasedProvider struct{}
 
-func (p *RoleBasedProvider) GetPermissions(_ context.Context, user natsauth.UserClaims) (natsauth.Permissions, error) {
+func (p *RoleBasedProvider) GetPermissions(_ context.Context, user *natsauth.UserClaims) (natsauth.Permissions, error) {
 	roles := extractRoles(user.Extra)
 	if len(roles) == 0 {
 		return natsauth.Permissions{}, natsauth.NewAccessDeniedError("no roles assigned to user")

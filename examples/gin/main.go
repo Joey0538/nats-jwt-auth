@@ -34,7 +34,7 @@ func main() {
 
 	auth, err := natsauth.NewAuthenticator(context.Background(), cfg,
 		natsauth.WithPermissionsProvider(
-			natsauth.PermissionsProviderFunc(func(_ context.Context, user natsauth.UserClaims) (natsauth.Permissions, error) {
+			natsauth.PermissionsProviderFunc(func(_ context.Context, user *natsauth.UserClaims) (natsauth.Permissions, error) {
 				rooms := []string{"room.general", fmt.Sprintf("user.%s.>", user.Subject)}
 				return natsauth.Permissions{PubAllow: rooms, SubAllow: rooms}, nil
 			}),

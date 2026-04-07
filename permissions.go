@@ -46,15 +46,15 @@ type Permissions struct {
 //   - Call an internal ACL/permissions service
 //   - Return static permissions based on SSO roles
 type PermissionsProvider interface {
-	GetPermissions(ctx context.Context, user UserClaims) (Permissions, error)
+	GetPermissions(ctx context.Context, user *UserClaims) (Permissions, error)
 }
 
 // PermissionsProviderFunc is a convenience type so teams can pass a plain
 // function instead of implementing a full interface.
-type PermissionsProviderFunc func(ctx context.Context, user UserClaims) (Permissions, error)
+type PermissionsProviderFunc func(ctx context.Context, user *UserClaims) (Permissions, error)
 
 // GetPermissions calls the underlying function.
-func (f PermissionsProviderFunc) GetPermissions(ctx context.Context, user UserClaims) (Permissions, error) {
+func (f PermissionsProviderFunc) GetPermissions(ctx context.Context, user *UserClaims) (Permissions, error) {
 	return f(ctx, user)
 }
 
@@ -63,7 +63,7 @@ func (f PermissionsProviderFunc) GetPermissions(ctx context.Context, user UserCl
 type DefaultPermissionsProvider struct{}
 
 // GetPermissions returns default permissions allowing chat.>, room.>, and user.<sub>.>.
-func (DefaultPermissionsProvider) GetPermissions(_ context.Context, user UserClaims) (Permissions, error) {
+func (DefaultPermissionsProvider) GetPermissions(_ context.Context, user *UserClaims) (Permissions, error) {
 	return Permissions{
 		PubAllow: []string{
 			"chat.>",

@@ -30,6 +30,8 @@ func main() {
 		TLSSkipVerify:   os.Getenv("TLS_SKIP_VERIFY") == "true",
 	}
 
+	// Override the default logger (slog.Default) with a text logger to stderr.
+	// Most teams won't need this — slog.Default() is used automatically.
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: slog.LevelDebug,
 	}))
@@ -58,7 +60,7 @@ func main() {
 
 type DBPermissionsProvider struct{}
 
-func (p *DBPermissionsProvider) GetPermissions(_ context.Context, user natsauth.UserClaims) (natsauth.Permissions, error) {
+func (p *DBPermissionsProvider) GetPermissions(_ context.Context, user *natsauth.UserClaims) (natsauth.Permissions, error) {
 	// In production, query your DB here:
 	//   rooms, err := p.db.GetRoomsForUser(ctx, user.Subject)
 	rooms := []string{"room.general", "room.engineering"}

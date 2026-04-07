@@ -29,7 +29,7 @@ func main() {
 
 	srv, err := echoserver.New(context.Background(), cfg,
 		natsauth.WithPermissionsProvider(
-			natsauth.PermissionsProviderFunc(func(_ context.Context, user natsauth.UserClaims) (natsauth.Permissions, error) {
+			natsauth.PermissionsProviderFunc(func(_ context.Context, user *natsauth.UserClaims) (natsauth.Permissions, error) {
 				rooms := []string{
 					"room.general",
 					"room.engineering",

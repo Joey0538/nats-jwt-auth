@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -76,7 +77,7 @@ func (s *Server) newEcho() *echo.Echo {
 		LogError:    true,
 		HandleError: true,
 		LogValuesFunc: func(_ echo.Context, v middleware.RequestLoggerValues) error {
-			s.auth.Logger().Info("request",
+			slog.Default().Info("request",
 				"method", v.Method,
 				"uri", v.URI,
 				"status", v.Status,
@@ -99,7 +100,7 @@ func (s *Server) Run() error {
 
 	srvErr := make(chan error, 1)
 	go func() {
-		s.auth.Logger().Info("natsauth server starting", "addr", addr)
+		slog.Default().Info("natsauth server starting", "addr", addr)
 		srvErr <- e.Start(addr)
 	}()
 
@@ -114,7 +115,7 @@ func (s *Server) Run() error {
 	case <-quit:
 	}
 
-	s.auth.Logger().Info("shutting down")
+	slog.Default().Info("shutting down")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
