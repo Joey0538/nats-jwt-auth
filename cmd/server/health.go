@@ -2,123 +2,149 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 	"time"
-
-	"github.com/labstack/echo/v4"
 )
 
-// checker is a single named readiness dependency. Check returns nil when the
-// dependency is healthy, or an error describing why it is not. Add a new
-// dependency by appending another checker — nothing else needs to change.
-type checker struct {
-	name  string
-	check func(ctx context.Context) error
+// Checker reports the health of a single critical dependency. Implementations
+// must be cheap and bounded (apply their own timeout) so the readiness probe
+// can never hang. Modeling checks behind this interface keeps the readiness
+// logic unit-testable with fakes, independent of real MongoDB/NATS/TSSO.
+type Checker interface {
+	// Name is the stable key used in the readiness response (e.g. "mongodb").
+	Name() string
+	// Check returns nil when healthy, or an error explaining why not.
+	Check(ctx context.Context) error
 }
 
-// handleLive is the Kubernetes liveness probe. It answers "is the process
-// alive?" and therefore performs no dependency checks — a failing dependency
-// must not cause the pod to be restarted. It returns 200 as long as the
-// process can serve HTTP.
-func handleLive(c echo.Context) error {
-	return c.JSON(http.StatusOK, map[string]string{"status": "alive"})
+// Report is the aggregated result of running every readiness Checker.
+type Report struct {
+	Healthy bool
+	Checks  map[string]string // name → "ok" | "failed"
 }
 
-// handleReady is the Kubernetes readiness probe. It answers "can this instance
-// serve traffic right now?" by running every registered dependency check.
-//
-//	all checks pass  → 200 {"status":"ready",     "checks":{...}}
-//	any check fails  → 503 {"status":"not_ready", "checks":{...}}
-//
-// A 503 makes Kubernetes stop routing traffic to the pod without restarting
-// it, so the instance recovers automatically once its dependencies do.
-func handleReady(checkers []checker) echo.HandlerFunc {
-	return func(c echo.Context) error {
-		ctx := c.Request().Context()
-		checks := make(map[string]string, len(checkers))
-		ready := true
+// Health aggregates the readiness Checkers for the service.
+type Health struct {
+	checkers []Checker
+}
 
-		for _, ch := range checkers {
-			if err := ch.check(ctx); err != nil {
-				checks[ch.name] = "unhealthy: " + err.Error()
-				ready = false
-				continue
-			}
-			checks[ch.name] = "ok"
+// NewHealth builds a Health aggregator from the given checkers.
+func NewHealth(checkers ...Checker) *Health {
+	return &Health{checkers: checkers}
+}
+
+// Check runs every checker (regardless of earlier failures) and returns the
+// aggregated Report so the response shows each dependency's status in one pass.
+func (h *Health) Check(ctx context.Context) Report {
+	report := Report{Healthy: true, Checks: make(map[string]string, len(h.checkers))}
+	for _, c := range h.checkers {
+		if err := c.Check(ctx); err != nil {
+			report.Checks[c.Name()] = "failed"
+			report.Healthy = false
+			continue
 		}
+		report.Checks[c.Name()] = "ok"
+	}
+	return report
+}
 
-		status := http.StatusOK
-		overall := "ready"
-		if !ready {
-			status = http.StatusServiceUnavailable
-			overall = "not_ready"
-		}
+// ---------------------------------------------------------------------------
+// TSSO (OIDC) — reachability of the SSO discovery endpoint.
+// ---------------------------------------------------------------------------
 
-		return c.JSON(status, map[string]any{
-			"status": overall,
-			"checks": checks,
-		})
+// TSSOChecker verifies the OIDC/SSO provider is reachable by fetching its
+// discovery document — the auth-service's only hard runtime dependency here.
+type TSSOChecker struct {
+	url     string
+	client  *http.Client
+	timeout time.Duration
+}
+
+func NewTSSOChecker(issuerURL string, timeout time.Duration) *TSSOChecker {
+	return &TSSOChecker{
+		url:     strings.TrimRight(issuerURL, "/") + "/.well-known/openid-configuration",
+		client:  http.DefaultClient,
+		timeout: timeout,
 	}
 }
 
-// newSSOChecker verifies the OIDC/SSO provider is reachable by fetching its
-// discovery document. This is the auth-service's only hard runtime
-// dependency: without it, no SSO token can be validated. The check is bounded
-// by timeout so the probe can never hang.
-func newSSOChecker(issuerURL string, timeout time.Duration) checker {
-	url := strings.TrimRight(issuerURL, "/") + "/.well-known/openid-configuration"
-	return checker{
-		name: "sso",
-		check: func(ctx context.Context) error {
-			ctx, cancel := context.WithTimeout(ctx, timeout)
-			defer cancel()
+func (c *TSSOChecker) Name() string { return "tsso" }
 
-			req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-			if err != nil {
-				return err
-			}
-			resp, err := http.DefaultClient.Do(req)
-			if err != nil {
-				return err
-			}
-			defer func() { _ = resp.Body.Close() }()
+func (c *TSSOChecker) Check(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
 
-			if resp.StatusCode != http.StatusOK {
-				return fmt.Errorf("discovery returned status %d", resp.StatusCode)
-			}
-			return nil
-		},
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.url, nil)
+	if err != nil {
+		return err
 	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("discovery returned status %d", resp.StatusCode)
+	}
+	return nil
 }
 
-// newNATSChecker is an extensibility stub. The auth-service currently signs
-// NATS user JWTs offline using an account seed — there is no live NATS
-// connection to probe. When a live NATS dependency is introduced, replace the
-// body below with a real connection/RTT check and enable it via
-// NATS_HEALTH_ENABLED. It is intentionally OFF by default so readiness never
-// reports a dependency it does not actually verify.
-func newNATSChecker() checker {
-	return checker{
-		name: "nats",
-		check: func(_ context.Context) error {
-			// TODO: ping the live NATS connection once one exists.
-			return nil
-		},
-	}
+// ---------------------------------------------------------------------------
+// MongoDB — ping the database.
+// ---------------------------------------------------------------------------
+
+// MongoPinger is the minimal surface the MongoChecker needs. The real
+// *mongo.Client satisfies this via a thin adapter; tests use a fake.
+type MongoPinger interface {
+	Ping(ctx context.Context) error
 }
 
-// newMongoChecker is an extensibility stub. The auth-service does not use
-// MongoDB today. When a Mongo dependency is added, replace the body with a
-// real ping (e.g. client.Ping) and enable it via MONGO_HEALTH_ENABLED. OFF by
-// default for the same honesty reason as the NATS stub.
-func newMongoChecker() checker {
-	return checker{
-		name: "mongo",
-		check: func(_ context.Context) error {
-			// TODO: client.Ping(ctx, nil) once a Mongo dependency exists.
-			return nil
-		},
+// MongoChecker reports MongoDB health by issuing a ping.
+type MongoChecker struct {
+	pinger  MongoPinger
+	timeout time.Duration
+}
+
+func NewMongoChecker(pinger MongoPinger, timeout time.Duration) *MongoChecker {
+	return &MongoChecker{pinger: pinger, timeout: timeout}
+}
+
+func (c *MongoChecker) Name() string { return "mongodb" }
+
+func (c *MongoChecker) Check(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
+	return c.pinger.Ping(ctx)
+}
+
+// ---------------------------------------------------------------------------
+// NATS — connection status.
+// ---------------------------------------------------------------------------
+
+// NATSConn is the minimal surface the NATSChecker needs. The real *nats.Conn
+// satisfies IsConnected(); tests use a fake.
+type NATSConn interface {
+	IsConnected() bool
+}
+
+// NATSChecker reports NATS health by inspecting the live connection status.
+type NATSChecker struct {
+	conn NATSConn
+}
+
+func NewNATSChecker(conn NATSConn) *NATSChecker {
+	return &NATSChecker{conn: conn}
+}
+
+func (c *NATSChecker) Name() string { return "nats" }
+
+func (c *NATSChecker) Check(_ context.Context) error {
+	if !c.conn.IsConnected() {
+		return errors.New("nats: not connected")
 	}
+	return nil
 }

@@ -7,16 +7,12 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/metric"
 )
 
-// TestMetricsExposed verifies that the application instruments are created and
-// surfaced on the SDK's Prometheus endpoint under their expected Prometheus
-// names (dot-notation translated, with _total / _seconds suffixes).
+// TestMetricsExposed verifies the application instruments surface on the SDK's
+// Prometheus endpoint under their expected names, labels, and buckets.
 func TestMetricsExposed(t *testing.T) {
-	// Keep the test hermetic: no OTLP collector is running locally.
+	// Keep the test hermetic: no OTLP collector runs locally.
 	t.Setenv("O11Y_TRACE_ENABLED", "false")
 	t.Setenv("O11Y_LOG_ENABLED", "false")
 
@@ -25,7 +21,7 @@ func TestMetricsExposed(t *testing.T) {
 		ServiceVersion:   "0.0.0",
 		ServiceNamespace: "platform",
 		Environment:      "testing",
-		MetricsAddr:      "127.0.0.1:21127",
+		MetricsAddr:      "127.0.0.1:22112",
 	}
 
 	ctx := context.Background()
@@ -35,27 +31,41 @@ func TestMetricsExposed(t *testing.T) {
 	}
 	defer func() { _ = obs.Shutdown(ctx) }()
 
-	// Record one sample on every instrument.
-	m.httpRequests.Add(ctx, 1, metric.WithAttributes(attribute.String("http.route", "/auth")))
-	m.httpDuration.Record(ctx, 0.012, metric.WithAttributes(attribute.String("http.route", "/auth")))
-	m.authentications.Add(ctx, 1, metric.WithAttributes(attribute.String("result", "success")))
-	m.tokensIssued.Add(ctx, 1)
-	m.tokenValidation.Add(ctx, 1, metric.WithAttributes(attribute.String("result", "valid")))
+	// Exercise every instrument once.
+	m.recordHTTP(ctx, "POST", "/auth", 200, 0.012)
+	m.recordAuthentication(ctx, "tsso", "success")
+	m.recordTokenIssued(ctx, "nats")
+	m.recordTokenValidation(ctx, "valid")
 
-	body := scrapeMetrics(t, "http://127.0.0.1:21127/metrics")
+	body := scrapeMetrics(t, "http://127.0.0.1:22112/metrics")
 
-	want := []string{
+	wantContains := []string{
+		// names
 		"auth_http_requests_total",
 		"auth_http_request_duration_seconds",
 		"auth_authentication_total",
 		"auth_token_issued_total",
 		"auth_token_validation_total",
-		`service_name="auth-service-test"`, // resource attribute became a constant label
+		// spec labels
+		`method="POST"`,
+		`path="/auth"`,
+		`status="200"`,
+		`provider="tsso"`,
+		`type="nats"`,
+		// SRE-standard histogram bucket
+		`le="0.01"`,
+		// resource attribute became a constant label
+		`service_name="auth-service-test"`,
 	}
-	for _, w := range want {
+	for _, w := range wantContains {
 		if !strings.Contains(body, w) {
 			t.Errorf("metrics output missing %q", w)
 		}
+	}
+
+	// The 0.005 bucket must NOT be present — the ticket's buckets start at 0.01.
+	if strings.Contains(body, `le="0.005"`) {
+		t.Error("unexpected le=\"0.005\" bucket; ticket buckets start at 0.01")
 	}
 }
 

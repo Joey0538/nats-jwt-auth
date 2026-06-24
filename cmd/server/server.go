@@ -14,8 +14,6 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/metric"
 
 	natsauth "github.com/joey0538/nats-jwt-auth"
 )
@@ -24,14 +22,14 @@ import (
 // Authenticator core plus the operational concerns (metrics, health checks,
 // structured logging) that make it Kubernetes-ready.
 type app struct {
-	auth     *natsauth.Authenticator
-	metrics  *metrics
-	logger   *slog.Logger
-	checkers []checker
+	auth    *natsauth.Authenticator
+	metrics *metrics
+	health  *Health
+	logger  *slog.Logger
 }
 
-// run builds the Echo server, registers routes and middleware, and blocks
-// until SIGINT/SIGTERM, then shuts down gracefully.
+// run builds the Echo server, registers routes and middleware, and blocks until
+// SIGINT/SIGTERM, then shuts down gracefully.
 func (a *app) run(port string) error {
 	e := echo.New()
 	e.HideBanner = true
@@ -50,8 +48,11 @@ func (a *app) run(port string) error {
 	e.POST("/auth", a.handleAuth)
 
 	// Kubernetes probes (served on the main API port).
-	e.GET("/healthz/live", handleLive)
-	e.GET("/healthz/ready", handleReady(a.checkers))
+	e.GET("/healthz/live", a.handleLive)
+	e.GET("/healthz/ready", a.handleReady)
+
+	// Backward-compatible legacy health endpoint (unchanged static JSON).
+	e.GET("/health", a.handleHealthLegacy)
 
 	// Note: Prometheus /metrics is served by the o11y SDK on its own port
 	// (METRICS_ADDR, default :2112), not here.
@@ -80,15 +81,44 @@ func (a *app) run(port string) error {
 	return e.Shutdown(ctx)
 }
 
-// isProbePath reports whether a route is a Kubernetes probe. Probes are
-// excluded from request metrics and logs so they don't drown out real traffic.
-func isProbePath(route string) bool {
-	return strings.HasPrefix(route, "/healthz/")
+// handleLive is the liveness probe: it answers "is the process alive?" and does
+// no dependency checks, so it stays cheap (<100ms) and a failing dependency can
+// never trigger a pod restart.
+func (a *app) handleLive(c echo.Context) error {
+	return c.JSON(http.StatusOK, map[string]string{"status": "alive"})
 }
 
-// httpMetrics records auth_http_requests_total and
-// auth_http_request_duration_seconds for every non-probe request, labelled by
-// method, route template and response status.
+// handleReady is the readiness probe: it runs every dependency check and returns
+// 200 when all pass, or 503 with the failing dependency(ies) marked "failed".
+func (a *app) handleReady(c echo.Context) error {
+	report := a.health.Check(c.Request().Context())
+
+	status := http.StatusOK
+	overall := "ready"
+	if !report.Healthy {
+		status = http.StatusServiceUnavailable
+		overall = "not_ready"
+	}
+	return c.JSON(status, map[string]any{
+		"status": overall,
+		"checks": report.Checks,
+	})
+}
+
+// handleHealthLegacy preserves the original /health endpoint for backward
+// compatibility — the same static JSON the echoserver returned.
+func (a *app) handleHealthLegacy(c echo.Context) error {
+	return c.JSON(http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// isProbePath reports whether a route is a health/probe endpoint. Probes are
+// excluded from request metrics and logs so they don't drown out real traffic.
+func isProbePath(route string) bool {
+	return route == "/health" || strings.HasPrefix(route, "/healthz/")
+}
+
+// httpMetrics records the HTTP golden-signal metrics for every non-probe
+// request, labelled by method, route template and response status.
 func (a *app) httpMetrics() echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
@@ -102,23 +132,21 @@ func (a *app) httpMetrics() echo.MiddlewareFunc {
 			if route == "" {
 				route = "unmatched"
 			}
-
-			attrs := metric.WithAttributes(
-				attribute.String("http.request.method", c.Request().Method),
-				attribute.String("http.route", route),
-				attribute.Int("http.response.status_code", statusFromResult(c, err)),
+			a.metrics.recordHTTP(
+				c.Request().Context(),
+				c.Request().Method,
+				route,
+				statusFromResult(c, err),
+				time.Since(start).Seconds(),
 			)
-			ctx := c.Request().Context()
-			a.metrics.httpRequests.Add(ctx, 1, attrs)
-			a.metrics.httpDuration.Record(ctx, time.Since(start).Seconds(), attrs)
 			return err
 		}
 	}
 }
 
 // requestLogger emits one structured log line per non-probe request. Because
-// slog.Default is the SDK logger, each line is automatically enriched with
-// traceId/spanId when a span is active.
+// slog.Default is the SDK logger, each line is enriched with traceId/spanId
+// when a span is active.
 func (a *app) requestLogger() echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {

@@ -6,8 +6,6 @@ import (
 	"net/http"
 
 	"github.com/labstack/echo/v4"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/metric"
 
 	natsauth "github.com/joey0538/nats-jwt-auth"
 )
@@ -31,24 +29,28 @@ type userInfoResp struct {
 	FamilyName        string `json:"family_name"`
 }
 
-// handleAuth validates an SSO token and issues a NATS user JWT, recording the
-// auth business metrics along the way.
+// handleAuth validates an SSO (TSSO) token and issues a NATS user JWT, recording
+// the business metrics along the way.
 func (a *app) handleAuth(c echo.Context) error {
 	ctx := c.Request().Context()
 
 	var req authRequest
 	if err := c.Bind(&req); err != nil {
-		a.recordAuthFailure(ctx, "bad_request", "")
+		a.metrics.recordAuthentication(ctx, "tsso", "failure")
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
 	}
 
 	result, err := a.auth.Authenticate(ctx, req.SSOToken, req.NATSPublicKey)
 	if err != nil {
-		a.recordAuthFailure(ctx, reasonFor(err), validationResultFor(err))
+		a.recordAuthFailure(ctx, err)
 		return mapAuthError(err)
 	}
 
-	a.recordAuthSuccess(ctx)
+	// Success: TSSO token was valid, authentication succeeded, NATS JWT issued.
+	a.metrics.recordTokenValidation(ctx, "valid")
+	a.metrics.recordAuthentication(ctx, "tsso", "success")
+	a.metrics.recordTokenIssued(ctx, "nats")
+
 	return c.JSON(http.StatusOK, authResponse{
 		NATSJwt: result.NATSJWT,
 		UserInfo: &userInfoResp{
@@ -62,62 +64,21 @@ func (a *app) handleAuth(c echo.Context) error {
 	})
 }
 
-// recordAuthSuccess increments the success-path counters: a valid token was
-// validated, authentication succeeded, and a NATS JWT was issued.
-func (a *app) recordAuthSuccess(ctx context.Context) {
-	a.metrics.authentications.Add(ctx, 1, metric.WithAttributes(
-		attribute.String("result", "success"),
-	))
-	a.metrics.tokenValidation.Add(ctx, 1, metric.WithAttributes(
-		attribute.String("result", "valid"),
-	))
-	a.metrics.tokensIssued.Add(ctx, 1)
-}
+// recordAuthFailure records the failure-path business metrics. Token-validation
+// outcomes are only recorded when validation was actually attempted (i.e. a
+// token was present and parsed), so malformed requests don't skew the
+// valid/invalid/expired distribution.
+func (a *app) recordAuthFailure(ctx context.Context, err error) {
+	a.metrics.recordAuthentication(ctx, "tsso", "failure")
 
-// recordAuthFailure increments the failure-path counters. validationResult is
-// empty for failures that occur before/around token validation (e.g. a
-// malformed request), in which case the token-validation counter is skipped.
-func (a *app) recordAuthFailure(ctx context.Context, reason, validationResult string) {
-	a.metrics.authentications.Add(ctx, 1, metric.WithAttributes(
-		attribute.String("result", "failure"),
-		attribute.String("reason", reason),
-	))
-	if validationResult != "" {
-		a.metrics.tokenValidation.Add(ctx, 1, metric.WithAttributes(
-			attribute.String("result", validationResult),
-		))
-	}
-}
-
-// reasonFor maps a typed authentication error to a low-cardinality reason
-// label for the auth_authentication_total counter.
-func reasonFor(err error) string {
 	switch {
-	case errors.Is(err, natsauth.ErrMissingToken),
-		errors.Is(err, natsauth.ErrMissingNKey),
-		errors.Is(err, natsauth.ErrInvalidNKey):
-		return "bad_request"
 	case errors.Is(err, natsauth.ErrTokenExpired):
-		return "token_expired"
+		a.metrics.recordTokenValidation(ctx, "expired")
 	case errors.Is(err, natsauth.ErrInvalidToken):
-		return "invalid_token"
+		a.metrics.recordTokenValidation(ctx, "invalid")
 	case errors.Is(err, natsauth.ErrAccessDenied):
-		return "access_denied"
-	default:
-		return "internal"
-	}
-}
-
-// validationResultFor maps a typed error to a token-validation result label,
-// or "" when the error is not about token validation.
-func validationResultFor(err error) string {
-	switch {
-	case errors.Is(err, natsauth.ErrTokenExpired):
-		return "expired"
-	case errors.Is(err, natsauth.ErrInvalidToken):
-		return "invalid"
-	default:
-		return ""
+		// Token validated successfully; the failure is authorization, not validation.
+		a.metrics.recordTokenValidation(ctx, "valid")
 	}
 }
 

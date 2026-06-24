@@ -40,21 +40,21 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Readiness checks: SSO is the only real runtime dependency today; NATS and
-	// Mongo are extensible stubs, registered only when explicitly enabled.
-	checkers := []checker{newSSOChecker(cfg.OIDCIssuerURL, oc.SSOReadyTimeout)}
-	if oc.NATSHealthEnabled {
-		checkers = append(checkers, newNATSChecker())
-	}
-	if oc.MongoHealthEnabled {
-		checkers = append(checkers, newMongoChecker())
+	// Readiness checks. TSSO is the only dependency with a live client in this
+	// repository. When MongoDB / NATS clients are wired into the service, add
+	// their checkers here — both accept an injected client behind an interface:
+	//
+	//	NewMongoChecker(mongoAdapter{client}, oc.ReadyTimeout)
+	//	NewNATSChecker(natsConn)
+	checkers := []Checker{
+		NewTSSOChecker(cfg.OIDCIssuerURL, oc.ReadyTimeout),
 	}
 
 	application := &app{
-		auth:     auth,
-		metrics:  m,
-		logger:   obs.Logger,
-		checkers: checkers,
+		auth:    auth,
+		metrics: m,
+		health:  NewHealth(checkers...),
+		logger:  obs.Logger,
 	}
 
 	if err := application.run(cfg.Port); err != nil {
