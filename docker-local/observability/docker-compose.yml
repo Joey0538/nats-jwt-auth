@@ -1,0 +1,37 @@
+# Local observability stack for the auth-service: Prometheus (scrape) + Grafana
+# (dashboards). Assumes the auth-service is running and exposing its metrics
+# port on the host at :2112 (METRICS_ADDR). Prometheus reaches it via
+# host.docker.internal.
+#
+# Usage:
+#   1. Run the auth-service (host): METRICS_ADDR=:2112 ... ./auth-service
+#   2. docker compose up -d
+#   3. Prometheus → http://localhost:9090   Grafana → http://localhost:3000 (admin/admin)
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: o11y-prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: o11y-grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
